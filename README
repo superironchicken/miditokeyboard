@@ -1,0 +1,194 @@
+# MIDI To Keyboard
+
+一个极简的 Python CLI 工具：解析 `.mid/.midi` 文件为音符事件，映射成“虚拟键盘 + 鼠标修饰键”组合，并按 MIDI 原始时间关系自动执行按下/释放。
+
+# 简介
+
+起因是拿到了三角洲的阿萨拉口琴，可以通过 zxcvbnm:1234567 / 按住鼠标中键:半音 / 按住鼠标左键为C3八度 / 按住鼠标右键为C5大调，默认C4大调，来模拟一个 自然覆盖C3–C5音域的单音（单旋律）乐器。
+
+而作者是音乐小白，上面那些简介文字都是查来的。平时吹口琴只会按住 pitch:48 的左键Z 狠狠模拟牛来牛叫。想要制作一个简单的吹奏脚本。
+
+# 快速开始
+
+## 安装
+
+```bash
+pip install -r requirements.txt
+```
+
+建议使用虚拟环境（Windows / Linux 通用）：
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate    # Windows
+source .venv/bin/activate # Linux
+pip install -r requirements.txt
+```
+
+## 使用
+
+```bash
+python main.py <midi文件路径>            # 真实模拟键盘
+python main.py <midi文件路径> --dry-run  # 只打印事件，不按键
+python main.py <midi文件路径> --speed 0.5  # 50% 速度播放
+```
+
+运行后先显示曲目信息（音符数、总时长），**按 Enter 后才开始按键**，趁这个间隙把焦点切到游戏窗口。
+
+| 参数 | 说明 |
+| --- | --- |
+| `--dry-run` | 不产生任何键盘/鼠标操作，只打印时间轴，用于验证解析和映射 |
+| `--speed` | 倍速，`0.5` 为一半速度，`2.0` 为两倍速；实际等待时间 = MIDI 时间差 / speed |
+
+中途停止：切回终端按 `Ctrl+C`，退出前会自动释放所有仍按住的键。
+
+# 项目架构
+
+## 目录结构
+
+```text
+miditokeyboard/
+│
+├── main.py            # CLI 入口
+├── requirements.txt
+├── README
+│
+├── midi/
+│   ├── __init__.py
+│   ├── models.py      # NoteEvent 数据模型
+│   └── parser.py      # pretty_midi 解析为 NoteEvent[]
+│
+├── mapping/
+│   ├── __init__.py
+│   └── keyboard.py    # pitch -> KeyBinding 键位映射
+│
+└── player/
+    ├── __init__.py
+    └── player.py      # KeyEvent 时间轴构建与播放
+```
+
+## 数据流
+
+```text
+.mid 文件
+    ↓  midi/parser.py (pretty_midi)
+NoteEvent[]          # pitch / start / end / velocity
+    ↓  mapping/keyboard.py
+已映射 NoteEvent[]    # 超范围音符 WARNING 并跳过
+    ↓  player/build_key_events()
+KeyEvent[]           # 按 (time, phase) 排序的完整时间轴
+    ↓  player/Player
+pynput               # keyboard + mouse 真实按键
+```
+
+三个模块职责单向依赖，互不反向引用：
+
+```text
+midi → mapping → player → main
+```
+
+## 各模块职责
+
+### `midi/models.py` — 数据模型
+
+`NoteEvent`（dataclass）：`pitch` / `start` / `end` / `velocity`，`duration` 为派生属性。业务代码不直接接触 `pretty_midi.Note`。
+
+### `midi/parser.py` — MIDI 解析
+
+`parse_midi(path) -> list[NoteEvent]`：
+
+- 跳过 percussion/drum track
+- 过滤 `end <= start` 的非法音符
+- 合并非鼓轨所有 instrument
+- 无音符时抛出明确错误
+- 按 `start` 排序
+
+### `mapping/keyboard.py` — 键位映射
+
+核心是 `KEY_MAP: dict[int, KeyBinding]`，由 pitch 48-83 程序化生成。
+
+`KeyBinding` 包含三个维度：
+
+| 字段 | 含义 | 示例 |
+| --- | --- | --- |
+| `key` | 实际按下的物理主键 | `z` |
+| `semitone` | 是否需按住半音修饰键 | `True` 对应 `z#` |
+| `mouse` | 需按住的鼠标键 | `mouse_left` / `mouse_right` |
+
+- `NOTE_KEYS`：半音编号 → 物理键（默认 z-x-c-v-b-n-m）
+- `SEMITONE_CLASSES`：哪些半音编号是黑键
+- `SEMITONE_KEY = "mouse_middle"`：半音修饰键，改一处即可全局生效
+- `REGION_MOUSE`：48-59 → 左键，60-71 → 无，72-83 → 右键
+- `label` 属性仅供显示（如 `z#`），传给 pynput 的永远是干净的物理键
+- `map_notes()`：过滤映射表之外的音符，打印 WARNING 而不崩溃
+
+### `player/player.py` — 时间轴与播放
+
+**`build_key_events(notes, speed)`** 把音符展开为事件序列：
+
+- 每个音符拆成主键 DOWN / UP 两个事件，天然支持重叠音符
+- 修饰键（半音键 / 鼠标键）按**引用计数**共享：第一个需要的音符按下，最后一个不再需要时才释放，重叠音符不互相打断
+- 同一时刻事件按 phase 排序：修饰 DOWN → 主键 DOWN → 主键 UP → 修饰 UP
+
+**`Player`** 按绝对时间执行时间轴：
+
+- `time.perf_counter()` 作为播放时钟，避免长时间播放的累计误差
+- 鼠标伪键名（`mouse_left/middle/right`）分派到 `pynput.mouse`，其余走 `pynput.keyboard`
+- `dry_run=True` 时只打印事件，不产生任何按键
+- 播放结束或 Ctrl+C 中断时，`finally` 中释放所有仍处于按下状态的键
+
+## 技术栈说明
+
+- `pretty_midi`：高层解析，直接得到 pitch/start/end/velocity
+- `pynput`：虚拟键盘 / 鼠标事件模拟，Windows / Linux 均可运行
+
+# 键位映射说明
+
+默认映射覆盖 pitch 48-83，对应三角洲口琴的三音区：
+
+| pitch | 主键 | 修饰 |
+| --- | --- | --- |
+| 48-59（C3 区） | z-x-c-v-b-n-m | 按住鼠标左键 |
+| 60-71（C4 区） | z-x-c-v-b-n-m | 无 |
+| 72-83（C5 区） | z-x-c-v-b-n-m | 按住鼠标右键 |
+
+黑键（如 `z#`）在按住对应音区修饰键之外，还需要**按住鼠标中键**。
+
+想改成自己的键位，只需要改 `mapping/keyboard.py`：
+
+- `NOTE_KEYS`：半音编号 → 物理主键（如把 `z` 改成 `a`）
+- `SEMITONE_KEY`：半音修饰键，改一处全局生效
+- `REGION_MOUSE`：各音区对应的鼠标键
+
+改完跑一次 `--dry-run` 即可验证，无需改动其他文件。
+
+# 安全说明
+
+- 本项目使用 **MIT License**
+- 这是一个**个人学习用脚本**。模拟按键属于自动化操作，可能违反个别游戏的服务条款；在《三角洲行动》等游戏中使用**存在封号风险，后果自负，与作者无关**（作者自己试过没事，但不保证任何结果）
+- 程序退出（含 Ctrl+C）时会释放所有已按下的键，不会让键盘卡在“按下”状态
+
+# 已知限制
+
+- **音域超限**：pitch 超出映射范围（48-83）的音符会打印 `WARNING: unmapped MIDI note` 并跳过。选谱时优先选择音域在 48-72（口琴自然音域）内的曲目
+- **单旋律乐器**：三角洲口琴是单音乐器，而程序按 MIDI 时间轴忠实还原每个音符。和弦/快速连音可能出现“z 还没松开 x 已经按下”的情况，导致 z 对应的音发不出来。**这不是 bug**，作者还没想好怎么处理，详见 issue（见「后续计划」）。目前的解决办法：选择**单旋律**（一次只响一个音）的 MIDI 乐谱
+- **Tempo 警告**：部分 MIDI 文件会触发 pretty_midi 的 `RuntimeWarning`（Tempo 事件放在非 0 轨），不影响使用
+- **无鼠标修饰的分区**：程序无法真实“吹奏”，音头/音尾由按键时长决定，表现力和真人口琴有差距
+
+# 后续计划
+
+- 解决上述“单旋律限制”：希望在和弦/连音场景下对音符做合并/截断策略（例如后音响起时立即抬起前音）。**欢迎提交 PR 或参与讨论该 issue**
+- 自定义 Mapping Profile（YAML）
+- 极简 GUI（PySide6）
+
+# 欢迎 PR
+
+这是一个学习性质的小项目，代码刻意保持简单（正确性 > 简单性 > 可调试性 > 扩展性）。
+
+欢迎任何形式的贡献：
+
+- 修复 bug、补充测试
+- 解决「已知限制」里的单旋律问题
+- 改进文档、分享你调试好的 MIDI 乐谱
+
+提 PR 前请先跑一次 `--dry-run` 验证行为符合预期，保持与现有代码风格一致。
