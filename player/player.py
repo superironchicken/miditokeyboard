@@ -1,5 +1,6 @@
 import logging
 import time
+import threading 
 from dataclasses import dataclass
 
 from midi.models import NoteEvent
@@ -91,6 +92,9 @@ class Player:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self._pressed: set[str] = set()
+        self._running = False
+        self._thread = None
+
         if not dry_run:
             from pynput.keyboard import Controller as KeyboardController
             from pynput.mouse import Button, Controller as MouseController
@@ -120,9 +124,24 @@ class Player:
             # 无论正常结束还是 Ctrl+C，都不能留下按住的键
             self._release_all()
 
+    def start(self, events: list[KeyEvent]):
+        if(self._thread and self._thread.is_alive()):
+            return
+        self._running=True
+        self._thread = threading.Thread(
+            target=self.play,
+            args=(events,)
+        )
+        self._thread.start()
+    def stop(self):
+        self._running=False
+
     def _run(self, events: list[KeyEvent]) -> None:
         start_clock = time.perf_counter()
         for event in events:
+
+            if not self._running:
+                break
             # 等到事件的绝对时间点（相对播放起点）
             delay = start_clock + event.time - time.perf_counter()
             if delay > 0:

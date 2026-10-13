@@ -1,6 +1,4 @@
-"""MIDI Keyboard Player 第一阶段 CLI。
-
-用法:
+"""
     python main.py song.mid            # 真实键盘操作
     python main.py song.mid --dry-run  # 只打印事件，不按键
     python main.py song.mid --speed 0.5
@@ -10,15 +8,8 @@ import argparse
 import logging
 import sys
 
-from mapping import map_notes
-from midi import parse_midi
-from player import Player, build_key_events
-
-
-def format_duration(seconds: float) -> str:
-    m, s = divmod(seconds, 60)
-    return f"{int(m):02d}:{s:04.1f}"
-
+from player import Player
+from runner import run
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="MIDI Keyboard Player")
@@ -34,7 +25,7 @@ def main() -> int:
         return 1
 
     try:
-        notes = parse_midi(args.midi_file)
+        info=run(args.midi_file,args.speed,args.dry_run)
     except FileNotFoundError:
         print(f"ERROR: 文件不存在: {args.midi_file}", file=sys.stderr)
         return 1
@@ -45,25 +36,17 @@ def main() -> int:
         print(f"ERROR: 无法解析 MIDI 文件: {e}", file=sys.stderr)
         return 1
 
-    mapped = map_notes(notes)
-    if not mapped:
-        print("ERROR: 没有音符落在键位映射范围内", file=sys.stderr)
-        return 1
-
-    duration = max(n.end for n in mapped) / args.speed
     print("MIDI Keyboard Player")
     print()
     print(f"File: {args.midi_file}")
-    print(f"Notes: {len(notes)} (mapped: {len(mapped)})")
-    print(f"Duration: {format_duration(duration)}")
+    print(f"Notes: {info["Notes"]} (mapped: {info["mapped"]})")
+    print(f"Duration: {info["duration"]}")
     if args.dry_run:
         print("Mode: dry-run (不执行键盘操作)")
     print()
     input("Press Enter to start...")
-
-    events = build_key_events(mapped, speed=args.speed)
     player = Player(dry_run=args.dry_run)
-    player.play(events)
+    player.play(info["events"])
     return 0
 
 
