@@ -39,14 +39,16 @@ def main() -> int:
     print("MIDI Keyboard Player")
     print()
     print(f"File: {args.midi_file}")
-    print(f"Notes: {info["Notes"]} (mapped: {info["mapped"]})")
-    print(f"Duration: {info["duration"]}")
+    print(f"Notes: {info['Notes']} (mapped: {info['mapped']})")
+    print(f"Duration: {info['duration']}")
     if args.dry_run:
         print("Mode: dry-run (不执行键盘操作)")
     print()
     input("Press Enter to start...")
     player = Player(dry_run=args.dry_run)
-    player.play(info["events"])
+    player.start(info['events'])
+    player.play(info['events'])
+    
     return 0
 
 

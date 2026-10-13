@@ -18,25 +18,26 @@ class MidiWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        
+        '''
         self.setAttribute(
             Qt.WA_TranslucentBackground
         )
         
         self.setWindowFlags(
             Qt.WindowStaysOnTopHint
-        ) 
+        )
+        
         self.setWindowFlags(
             Qt.FramelessWindowHint
         )
-
+        '''
         self.resize(
             300,
             400
         )
 
         self.player = Player(
-            dry_run=True
+            dry_run=False
         )
         
         self.files = list(Path(folder).glob("*.mid")) + list(Path(folder).glob("*.midi"))
@@ -86,7 +87,9 @@ class MidiWindow(QWidget):
         self.player.start(
             info["events"]
         )
-
+        self.player.play(
+            info["events"]
+        )
 
     def stop(self):
         self.player.stop()
