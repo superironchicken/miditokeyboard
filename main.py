@@ -41,6 +41,7 @@ def main() -> int:
     print(f"File: {args.midi_file}")
     print(f"Notes: {info['Notes']} (mapped: {info['mapped']})")
     print(f"Duration: {info['duration']}")
+    print(f"Events: {len(info['events'])}")
     if args.dry_run:
         print("Mode: dry-run (不执行键盘操作)")
     print()

@@ -33,4 +33,8 @@ def parse_midi(path: str) -> list[NoteEvent]:
         raise ValueError(f"MIDI 文件中没有可播放的音符: {path}")
 
     notes.sort(key=lambda n: n.start)
+    '''
+    for note in notes:
+        print(f"Note: pitch={note.pitch}, start={note.start:.3f}, end={note.end:.3f}, velocity={note.velocity}")
+    '''
     return notes

@@ -18,19 +18,11 @@ class MidiWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        '''
-        self.setAttribute(
-            Qt.WA_TranslucentBackground
-        )
         
         self.setWindowFlags(
-            Qt.WindowStaysOnTopHint
+            Qt.WindowType.WindowStaysOnTopHint
         )
         
-        self.setWindowFlags(
-            Qt.FramelessWindowHint
-        )
-        '''
         self.resize(
             300,
             400
@@ -82,12 +74,15 @@ class MidiWindow(QWidget):
         path = self.files[row]
 
         info = run(
-            str(path)
+            str(path),
+            speed=0.5,
+            optimization=True
         )
+        '''暂停3s'''
+        import time
+        time.sleep(3)
+
         self.player.start(
-            info["events"]
-        )
-        self.player.play(
             info["events"]
         )
 
