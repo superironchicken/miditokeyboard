@@ -1,6 +1,11 @@
 # MIDI To Keyboard
 
-一个极简的 Python CLI 工具：解析 `.mid/.midi` 文件为音符事件，映射成“虚拟键盘 + 鼠标修饰键”组合，并按 MIDI 原始时间关系自动执行按下/释放。
+一个极简的 Python 工具：解析 `.mid/.midi` 文件为音符事件，映射成“虚拟键盘 + 鼠标修饰键”组合，并按 MIDI 原始时间关系自动执行按下/释放。
+
+同时提供两种入口：
+
+- `main.py`：命令行，适合验证和调试
+- `gui.py`：极简 PySide6 窗口，从本地曲库选曲播放
 
 # 简介
 
@@ -27,13 +32,15 @@ pip install -r requirements.txt
 
 ## 使用
 
+### CLI
+
 ```bash
-python main.py <midi文件路径>            # 真实模拟键盘
-python main.py <midi文件路径> --dry-run  # 只打印事件，不按键
+python main.py <midi文件路径>              # 真实模拟键盘
+python main.py <midi文件路径> --dry-run    # 只打印事件，不按键
 python main.py <midi文件路径> --speed 0.5  # 50% 速度播放
 ```
 
-运行后先显示曲目信息（音符数、总时长），**按 Enter 后才开始按键**，趁这个间隙把焦点切到游戏窗口。
+运行后先显示曲目信息（音符数、映射后音符数、总时长、事件数），**按 Enter 后才开始按键**，趁这个间隙把焦点切到游戏窗口。
 
 | 参数 | 说明 |
 | --- | --- |
@@ -41,6 +48,22 @@ python main.py <midi文件路径> --speed 0.5  # 50% 速度播放
 | `--speed` | 倍速，`0.5` 为一半速度，`2.0` 为两倍速；实际等待时间 = MIDI 时间差 / speed |
 
 中途停止：切回终端按 `Ctrl+C`，退出前会自动释放所有仍按住的键。
+
+### GUI
+
+```bash
+python gui.py
+```
+
+窗口会置顶显示，从 `score_set/midi/` 读取曲目列表，选中后点击“播放”即可。当前 GUI 的固定行为：
+
+- 速度固定为 `0.5`
+- 开启单音化（`optimization=True`）
+- 点击播放后先等待 3 秒，方便切换游戏窗口（等待期间界面会短暂无响应）
+
+“取消”按钮目前停止不够及时，见「已知限制」。
+
+> `score_set/` 是独立的乐谱仓库（已在 `.gitignore` 中排除），需要自行放到项目根目录。
 
 # 项目架构
 
@@ -50,13 +73,16 @@ python main.py <midi文件路径> --speed 0.5  # 50% 速度播放
 miditokeyboard/
 │
 ├── main.py            # CLI 入口
+├── gui.py             # 极简 PySide6 GUI
+├── runner.py          # 共用处理流水线：midi -> events
 ├── requirements.txt
 ├── README
 │
 ├── midi/
 │   ├── __init__.py
 │   ├── models.py      # NoteEvent 数据模型
-│   └── parser.py      # pretty_midi 解析为 NoteEvent[]
+│   ├── parser.py      # pretty_midi 解析为 NoteEvent[]
+│   └── monophonic.py  # 单音化：把重叠音符修剪为单旋律
 │
 ├── mapping/
 │   ├── __init__.py
@@ -75,16 +101,24 @@ miditokeyboard/
 NoteEvent[]          # pitch / start / end / velocity
     ↓  mapping/keyboard.py
 已映射 NoteEvent[]    # 超范围音符 WARNING 并跳过
+    ↓  midi/monophonic.py（可选，GUI 默认开启）
+单旋律 NoteEvent[]    # 时间上互不重叠
     ↓  player/build_key_events()
 KeyEvent[]           # 按 (time, phase) 排序的完整时间轴
     ↓  player/Player
 pynput               # keyboard + mouse 真实按键
 ```
 
-三个模块职责单向依赖，互不反向引用：
+`runner.run()` 把上面这条流水线串起来，`main.py` 和 `gui.py` 都只负责调用它，不再各自复制处理逻辑。
+
+模块依赖保持单向：
 
 ```text
-midi → mapping → player → main
+midi → mapping → player
+          ↑
+       runner
+       ↑      ↑
+    main.py  gui.py
 ```
 
 ## 各模块职责
@@ -103,6 +137,43 @@ midi → mapping → player → main
 - 无音符时抛出明确错误
 - 按 `start` 排序
 
+### `midi/monophonic.py` — 单音化
+
+`monophonize(notes) -> list[NoteEvent]`：把有重叠的音符修剪成时间上互不重叠的单旋律，解决“前一个键还没松开，后一个键已经按下”导致的丢音。
+
+对每一对重叠音符（A 在前、B 在后）：
+
+- `A.pitch > B.pitch`：高音继续响，`B.start = A.end`（后音让路）
+- `A.pitch < B.pitch`：新音盖住旧音，`A.end = B.start`（前音让路）
+- `A.pitch == B.pitch`：视为断奏重按，`B.start = A.end`（后音让路）
+
+补充约定：
+
+- **不拆分音符**：只挪 `start` 或 `end`，不把一个音切成两段
+- **被完全覆盖就丢弃**：修剪后 `start >= end` 的音符发不出声，直接去掉
+- 返回全新对象，不修改传入的列表及元素
+
+输出满足：按 `start` 升序，任意两个音符互不重叠（可以首尾相接）。
+
+### `runner.py` — 统一处理流水线
+
+`run(midi_file, speed=1.0, dry_run=False, optimization=False)` 依次完成：
+
+1. `parse_midi()` 解析
+2. `map_notes()` 过滤超范围音符
+3. 可选 `monophonize()` 单音化
+4. `build_key_events()` 生成时间轴
+5. 返回 `Notes` / `mapped` / `duration` / `events`
+
+注意：`optimization` 在 `runner` 中默认 `False`。当前 **GUI 显式开启**，CLI 尚未暴露单音化开关（CLI 目前不开启）。
+
+### `gui.py` — 极简 GUI
+
+- `QListWidget` 列出 `score_set/midi/` 下的 `.mid/.midi`
+- “播放”调用 `runner.run(..., speed=0.5, optimization=True)`，然后 `Player.start()`
+- “取消”调用 `Player.stop()`
+- 窗口置顶（`WindowStaysOnTopHint`），半透明
+
 ### `mapping/keyboard.py` — 键位映射
 
 核心是 `KEY_MAP: dict[int, KeyBinding]`，由 pitch 48-83 程序化生成。
@@ -119,6 +190,7 @@ midi → mapping → player → main
 - `SEMITONE_CLASSES`：哪些半音编号是黑键
 - `SEMITONE_KEY = "mouse_middle"`：半音修饰键，改一处即可全局生效
 - `REGION_MOUSE`：48-59 → 左键，60-71 → 无，72-83 → 右键
+- `modifiers` 属性把半音键和鼠标键合并成需要按住的修饰键集合
 - `label` 属性仅供显示（如 `z#`），传给 pynput 的永远是干净的物理键
 - `map_notes()`：过滤映射表之外的音符，打印 WARNING 而不崩溃
 
@@ -132,6 +204,7 @@ midi → mapping → player → main
 
 **`Player`** 按绝对时间执行时间轴：
 
+- `play()` 在调用线程中顺序执行；`start()` 在后台线程中执行，供 GUI 使用；`stop()` 置位停止标志
 - `time.perf_counter()` 作为播放时钟，避免长时间播放的累计误差
 - 鼠标伪键名（`mouse_left/middle/right`）分派到 `pynput.mouse`，其余走 `pynput.keyboard`
 - `dry_run=True` 时只打印事件，不产生任何按键
@@ -141,6 +214,7 @@ midi → mapping → player → main
 
 - `pretty_midi`：高层解析，直接得到 pitch/start/end/velocity
 - `pynput`：虚拟键盘 / 鼠标事件模拟，Windows / Linux 均可运行
+- `PySide6`：GUI
 
 # 键位映射说明
 
@@ -162,6 +236,28 @@ midi → mapping → player → main
 
 改完跑一次 `--dry-run` 即可验证，无需改动其他文件。
 
+# MIDI 文件的可信度
+
+这是比“单音化”更深一层、也更难绕开的问题：**不是所有 `.mid` 文件都是可信的。**
+
+MIDI 只规定“怎样记录音符事件”，并不保证记录的内容是一份可靠、可演奏的谱子。常见情况包括：
+
+- 从音频自动转录出来的 MIDI，本身就可能漏音、错音、节奏漂移
+- 编曲/播放软件导出的 MIDI，包含多条乐器轨、和弦、装饰音、伴奏
+- 时间被过度量化，或 tempo map 异常，听起来和原曲对不上
+- 音高、时值、轨道划分存在错误
+
+目前程序对 MIDI 的假设是“音高和时值基本可信”，只做了这些清洗：
+
+- 跳过鼓轨
+- 过滤 `end <= start` 的非法音符
+- 过滤映射范围外的音符
+- 可选的单音化
+
+它无法判断“这个音到底该不该响”“这段节奏到底对不对”。所以同一个播放器，换一份不可信的 MIDI，结果可能完全不同。**选谱/转谱阶段的质量，基本决定了最终效果。**
+
+未来加入 `mp4 → mid → keyboard` 后，这个问题会被放大：音频转录本身就有误差，不能把转录结果直接喂给播放器，中间需要一层“可信度评估与清洗”。
+
 # 安全说明
 
 - 本项目使用 **MIT License**
@@ -171,15 +267,19 @@ midi → mapping → player → main
 # 已知限制
 
 - **音域超限**：pitch 超出映射范围（48-83）的音符会打印 `WARNING: unmapped MIDI note` 并跳过。选谱时优先选择音域在 48-72（口琴自然音域）内的曲目
-- **单旋律乐器**：三角洲口琴是单音乐器，而程序按 MIDI 时间轴忠实还原每个音符。和弦/快速连音可能出现“z 还没松开 x 已经按下”的情况，导致 z 对应的音发不出来。**这不是 bug**，作者还没想好怎么处理，详见 issue（见「后续计划」）。目前的解决办法：选择**单旋律**（一次只响一个音）的 MIDI 乐谱
+- **MIDI 本身不可信**：见上一节。程序只做有限的格式清洗，无法纠正错音、错节奏、错误分轨
+- **单音化是启发式策略**：`monophonize` 只消除时间重叠，按“低音让路/新音盖旧音”的规则修剪，可能改变和弦与装饰音的效果；它不等于“音乐上正确”的简化。CLI 当前默认未开启该策略，和弦/连音仍可能出现丢音
+- **GUI 取消不够及时**：`Player.stop()` 只置位停止标志，而播放循环在 `time.sleep()` 中等待下一个事件，无法立刻打断；若两个事件间隔很长，点击“取消”后要等当前等待结束才会停
 - **Tempo 警告**：部分 MIDI 文件会触发 pretty_midi 的 `RuntimeWarning`（Tempo 事件放在非 0 轨），不影响使用
-- **无鼠标修饰的分区**：程序无法真实“吹奏”，音头/音尾由按键时长决定，表现力和真人口琴有差距
+- **表现力有限**：程序无法真实“吹奏”，音头/音尾由按键时长决定，和真人口琴有差距
 
 # 后续计划
 
-- 解决上述“单旋律限制”：希望在和弦/连音场景下对音符做合并/截断策略（例如后音响起时立即抬起前音）。**欢迎提交 PR 或参与讨论该 issue**
+- **`mp4 → mid → keyboard` 路径**：从音频提取/转录 MIDI，再做清洗与可信度评估，最后进入现有播放流水线。重点不是“能转”，而是“转出来的结果敢不敢直接弹”
+- **MIDI 可信度与清洗**：对解析结果做进一步校验（音域压缩、节奏异常检测、轨道筛选、单音化策略改进）
+- 修复 GUI 的及时停止：把阻塞式 `time.sleep()` 换成可中断等待
+- GUI 增加速度选择、单音化开关等设置
 - 自定义 Mapping Profile（YAML）
-- 极简 GUI（PySide6）
 
 # 欢迎 PR
 
@@ -188,7 +288,8 @@ midi → mapping → player → main
 欢迎任何形式的贡献：
 
 - 修复 bug、补充测试
-- 解决「已知限制」里的单旋律问题
-- 改进文档、分享你调试好的 MIDI 乐谱
+- 改进 MIDI 清洗与单音化策略，分享你调试好的 MIDI 乐谱
+- 推进 `mp4 → mid` 的转录与可信度评估
+- 改进文档
 
 提 PR 前请先跑一次 `--dry-run` 验证行为符合预期，保持与现有代码风格一致。
